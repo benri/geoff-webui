@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 
+target=$TARGET
+
+# if target is proxy
+if [ "$target" = "proxy" ]
+then
+  python proxy.py
+  exit 0
+fi
 
 proto=$(echo $LLM_URL | grep :// | sed -e's,^\(.*://\).*,\1,g')
 url=$(echo $LLM_URL | sed -e s,$proto,,g)
