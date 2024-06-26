@@ -1,12 +1,16 @@
 import os
 
+from typing import Optional
+
+import typer
+from typing_extensions import Annotated
+
 import asyncio
 from aiohttp import web, ClientSession
 
 from urllib.parse import urlparse, urljoin
 
 TARGET_SERVER = os.environ.get('LLM_URL')
-PORT = os.environ.get('PORT', 8000)
 
 models = {
     "object": "list",
@@ -90,7 +94,9 @@ async def _relay_data(writer, reader):
         writer.write(line)
 
 
-if __name__ == '__main__':
+def main(
+        port: Annotated[Optional[int], typer.Option("--port", "-p", help="The Port of the server.")] = 8000
+):
     server_url = TARGET_SERVER
     if not server_url.endswith('/'):
         server_url += '/'
@@ -100,5 +106,9 @@ if __name__ == '__main__':
     app = web.Application()
     app.add_routes([web.route('*', '/{tail:.*}', handler)])
 
-    web.run_app(app, host='0.0.0.0', port=PORT)
-    print(f'Reverse proxy server running on port {PORT}...')
+    web.run_app(app, host='0.0.0.0', port=port)
+    print(f'Reverse proxy server running on port {port}...')
+
+
+if __name__ == '__main__':
+    typer.run(main)
