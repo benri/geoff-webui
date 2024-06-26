@@ -5,7 +5,7 @@ target=$TARGET
 # if target is proxy
 if [ "$target" = "proxy" ]
 then
-  python proxy.py
+  python proxy.py --port $PORT
   exit 0
 fi
 
