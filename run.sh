@@ -9,12 +9,10 @@ then
   exit 0
 fi
 
-proto=$(echo $LLM_URL | grep :// | sed -e's,^\(.*://\).*,\1,g')
-url=$(echo $LLM_URL | sed -e s,$proto,,g)
-token="$(echo $url | grep @ | cut -d@ -f1)"
-host="$(echo $url | grep @ | cut -d@ -f2)"
-
 export OPENAI_API_BASE_URL=$PROXY_URL
-export OPENAI_API_KEY=$token
+export OPENAI_API_KEY="foobar"
+
+export IMAGES_OPENAI_API_BASE_URL=$PROXY_URL
+export IMAGES_OPENAI_API_KEY="foobar"
 
 open-webui serve --port $PORT

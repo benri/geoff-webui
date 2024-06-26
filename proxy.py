@@ -2,6 +2,7 @@ import json
 import os
 from urllib.parse import urlparse, urljoin
 import io
+import tiktoken
 
 import typer
 from typing import Optional
@@ -10,7 +11,10 @@ from typing_extensions import Annotated
 import asyncio
 from aiohttp import web, ClientSession
 
-TARGET_SERVER = os.environ.get('LLM_URL')
+LLM_URL = os.environ.get('LLM_URL')
+DIFFUSION_URL = os.environ.get('DIFFUSION_URL')
+
+DIFF_TOKEN_LIMIT = int(os.environ.get('DIFF_TOKEN_LIMIT', 75))
 
 models = {
     "object": "list",
@@ -29,31 +33,6 @@ models = {
         },
     ],
 }
-
-
-async def proxy_request(request, session, json_body=None):
-    path = request.url.path.rstrip('/')
-    target_url = request.app['target_url']
-    target_path = urljoin(target_url.path, path.lstrip('/'))
-
-    req_json = {}
-    if request.body_exists:
-        req_json = await request.json()
-
-    print("Request JSON:")
-    print(req_json)
-
-    # Send the original request to the target server with all headers
-    headers = {
-        'User-Agent': 'openai-proxy',
-        'Accept': '*/*',
-        'Authorization': 'Bearer ' + target_url.username,
-        'Content-Type': 'application/json',
-    }
-
-    u = target_url.scheme + '://' + target_url.hostname + target_path
-    return await session.request(request.method, str(u), headers=headers,
-                                 json=json_body if json_body else req_json)
 
 
 async def handle_chat_completions(request, session):
@@ -115,10 +94,67 @@ async def handle_chat_completions(request, session):
     return resp
 
 
+async def handle_image_generations(request, session):
+    req_json = {}
+    if request.body_exists:
+        req_json = await request.json()
+
+    req_json["n"] = None
+
+    prompt = req_json.get("prompt", "")
+    enc = tiktoken.get_encoding("cl100k_base")
+    tokens = enc.encode(prompt)
+    if len(tokens) > DIFF_TOKEN_LIMIT:
+        prompt = enc.decode(tokens[:DIFF_TOKEN_LIMIT])
+        req_json["prompt"] = prompt
+
+    response = await proxy_request(request, session, target='diff', json_body=req_json)
+
+    response_stream = io.BytesIO(await response.content.read())
+    res_json = json.loads(response_stream.read().decode('utf-8'))
+
+    response_stream.seek(0)
+
+    if response.status != 200:
+        print(f"Response (code: {response.status}):")
+        print(res_json)
+
+    return web.Response(body=response_stream, status=response.status, content_type=response.content_type)
+
+
 async def handle_default(request, session):
     response = await proxy_request(request, session)
 
     return web.Response(body=response.content, status=response.status, content_type=response.content_type)
+
+
+async def proxy_request(request, session, json_body=None, target='llm'):
+    path = request.url.path.rstrip('/')
+    target_url = request.app['llm_url'] if target == 'llm' else request.app['diff_url']
+    target_path = urljoin(target_url.path, path.lstrip('/'))
+
+    req_json = {}
+    if request.body_exists:
+        req_json = await request.json()
+
+    print("Request JSON:")
+    print(req_json)
+
+    if json_body:
+        print("Modified Request JSON:")
+        print(json_body)
+
+    # Send the original request to the target server with all headers
+    headers = {
+        'User-Agent': 'openai-proxy',
+        'Accept': '*/*',
+        'Authorization': 'Bearer ' + target_url.username,
+        'Content-Type': 'application/json',
+    }
+
+    u = target_url.scheme + '://' + target_url.hostname + target_path
+    return await session.request(request.method, str(u), headers=headers,
+                                 json=json_body if json_body else req_json)
 
 
 async def handler(request):
@@ -150,6 +186,8 @@ async def handler(request):
                 return web.json_response(status=200, data=models[1])
             elif path == '/chat/completions':
                 return await handle_chat_completions(request, session)
+            elif path == '/images/generations':
+                return await handle_image_generations(request, session)
 
             return await handle_default(request, session)
 
@@ -165,14 +203,21 @@ async def _relay_data(writer, reader):
 def main(
         port: Annotated[Optional[int], typer.Option("--port", "-p", help="The Port of the server.")] = 8000
 ):
-    server_url = TARGET_SERVER
-    if not server_url.endswith('/'):
-        server_url += '/'
-    server_url = urljoin(server_url, 'v1/')
-    parsed_url = urlparse(server_url)
+    llm_url = LLM_URL
+    if not llm_url.endswith('/'):
+        llm_url += '/'
+    llm_url = urljoin(llm_url, 'v1/')
+    parsed_llm_url = urlparse(llm_url)
+
+    diff_url = DIFFUSION_URL
+    if not diff_url.endswith('/'):
+        diff_url += '/'
+    diff_url = urljoin(diff_url, 'v1/')
+    parsed_diff_url = urlparse(diff_url)
 
     app = web.Application()
-    app['target_url'] = parsed_url
+    app['llm_url'] = parsed_llm_url
+    app['diff_url'] = parsed_diff_url
     app.add_routes([web.route('*', '/{tail:.*}', handler)])
 
     web.run_app(app, host='0.0.0.0', port=port)
