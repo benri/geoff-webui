@@ -1,0 +1,10 @@
+[_]
+schema-version = "0.2"
+id = "geoff-webui"
+name = "Geoff - Open WebUI"
+version = "1.0.0"
+
+[io.buildpacks]
+exclude = [
+    "/README.md"
+]
