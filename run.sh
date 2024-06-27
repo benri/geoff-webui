@@ -15,4 +15,7 @@ export OPENAI_API_KEY="foobar"
 export IMAGES_OPENAI_API_BASE_URL=$PROXY_URL
 export IMAGES_OPENAI_API_KEY="foobar"
 
+export RAG_OPENAI_API_BASE_URL=$PROXY_URL
+export RAG_OPENAI_API_KEY="foobar"
+
 open-webui serve --port $PORT

@@ -12,7 +12,9 @@ import asyncio
 from aiohttp import web, ClientSession
 
 LLM_URL = os.environ.get('LLM_URL')
+LLAMA_URL = os.environ.get('LLAMA_URL')
 DIFFUSION_URL = os.environ.get('DIFFUSION_URL')
+EMBEDDING_URL = os.environ.get('EMBEDDING_URL')
 
 DIFF_TOKEN_LIMIT = int(os.environ.get('DIFF_TOKEN_LIMIT', 75))
 
@@ -31,6 +33,18 @@ models = {
             "created": 0,
             "owned_by": "openai"
         },
+        {
+            "id": "llama3-8b",
+            "object": "model",
+            "created": 0,
+            "owned_by": "openai"
+        },
+        {
+            "id": "gritlm-7b",
+            "object": "model",
+            "created": 0,
+            "owned_by": "openai"
+        }
     ],
 }
 
@@ -44,16 +58,18 @@ async def handle_chat_completions(request, session):
     if 'stream' in req_json:
         req_json['stream'] = False
 
-    response = await proxy_request(request, session, json_body=req_json)
+    model = req_json.get('model', '')
 
-    response_stream = io.BytesIO(await response.content.read())
+    response = await proxy_request(request, session, target=model, json_body=req_json)
 
-    res_json = json.loads(response_stream.read().decode('utf-8'))
-    print("Response:")
-    print(res_json)
-    response_stream.seek(0)
+    response_stream = await inspect_response(response)
 
-    if stream:
+    if stream and response.status == 200:
+        res_json = json.loads(response_stream.read().decode('utf-8'))
+        print("Response:")
+        print(res_json)
+        response_stream.seek(0)
+
         # generate test events async
         async def generate_events():
             ret_json = res_json
@@ -108,8 +124,53 @@ async def handle_image_generations(request, session):
         prompt = enc.decode(tokens[:DIFF_TOKEN_LIMIT])
         req_json["prompt"] = prompt
 
-    response = await proxy_request(request, session, target='diff', json_body=req_json)
+    response = await proxy_request(request, session, target=req_json.get("model"), json_body=req_json)
 
+    response_stream = await inspect_response(response)
+    return web.Response(body=response_stream, status=response.status, content_type=response.content_type)
+
+
+async def handle_embeddings(request, session):
+    req_json = {}
+    if request.body_exists:
+        req_json = await request.json()
+
+    i = req_json.get('input', '')
+    if isinstance(i, list) and len(i) > 0:
+        req_json['input'] = i[0]
+
+    response = await proxy_request(request, session, target=req_json.get("model"), json_body=req_json)
+    response_stream = await inspect_response(response)
+
+    if response.status == 200:
+        res_json = json.loads(response_stream.read().decode('utf-8'))
+        response_stream.seek(0)
+
+        data = {
+            "object": res_json["data"][0]["object"],
+            "index": res_json["data"][0]["index"],
+            "embedding": res_json["data"][0]["embeddings"]
+        }
+        ret_json = {
+            "object": res_json["object"],
+            "data": [data],
+            "model": res_json["model"],
+            "usage": res_json["usage"],
+        }
+        return web.Response(body=json.dumps(ret_json).encode('utf-8'),
+                            status=response.status,
+                            content_type='application/json')
+    else:
+        return web.Response(body=response_stream, status=response.status, content_type=response.content_type)
+
+
+async def handle_default(request, session):
+    response = await proxy_request(request, session)
+
+    return web.Response(body=response.content, status=response.status, content_type=response.content_type)
+
+
+async def inspect_response(response):
     response_stream = io.BytesIO(await response.content.read())
     res_json = json.loads(response_stream.read().decode('utf-8'))
 
@@ -119,18 +180,21 @@ async def handle_image_generations(request, session):
         print(f"Response (code: {response.status}):")
         print(res_json)
 
-    return web.Response(body=response_stream, status=response.status, content_type=response.content_type)
+    return response_stream
 
 
-async def handle_default(request, session):
-    response = await proxy_request(request, session)
-
-    return web.Response(body=response.content, status=response.status, content_type=response.content_type)
-
-
-async def proxy_request(request, session, json_body=None, target='llm'):
+async def proxy_request(request, session, json_body=None, target='mixtral-8x7b'):
     path = request.url.path.rstrip('/')
-    target_url = request.app['llm_url'] if target == 'llm' else request.app['diff_url']
+    if target == "mixtral-8x7b":
+        target_url = request.app['mixtral_url']
+    elif target == "llama3-8b":
+        target_url = request.app['llama_url']
+    elif target == "sdxl":
+        target_url = request.app['diff_url']
+    elif target == "gritlm-7b":
+        target_url = request.app['embedding_url']
+    else:
+        raise f"Unrecognized target: {target}"
     target_path = urljoin(target_url.path, path.lstrip('/'))
 
     req_json = {}
@@ -184,10 +248,16 @@ async def handler(request):
                 return web.json_response(status=200, data=models[0])
             elif path == '/models/sdxl':
                 return web.json_response(status=200, data=models[1])
+            elif path == '/models/llama3-8b':
+                return web.json_response(status=200, data=models[2])
+            elif path == '/models/gritlm-7b':
+                return web.json_response(status=200, data=models[3])
             elif path == '/chat/completions':
                 return await handle_chat_completions(request, session)
             elif path == '/images/generations':
                 return await handle_image_generations(request, session)
+            elif path == '/embeddings':
+                return await handle_embeddings(request, session)
 
             return await handle_default(request, session)
 
@@ -203,11 +273,19 @@ async def _relay_data(writer, reader):
 def main(
         port: Annotated[Optional[int], typer.Option("--port", "-p", help="The Port of the server.")] = 8000
 ):
-    llm_url = LLM_URL
-    if not llm_url.endswith('/'):
-        llm_url += '/'
-    llm_url = urljoin(llm_url, 'v1/')
-    parsed_llm_url = urlparse(llm_url)
+    # mixtral
+    mixtral_url = LLM_URL
+    if not mixtral_url.endswith('/'):
+        mixtral_url += '/'
+    mixtral_url = urljoin(mixtral_url, 'v1/')
+    parsed_mixtral_url = urlparse(mixtral_url)
+
+    # llama
+    llama_url = LLAMA_URL
+    if not llama_url.endswith('/'):
+        llama_url += '/'
+    llama_url = urljoin(llama_url, 'v1/')
+    parsed_llama_url = urlparse(llama_url)
 
     diff_url = DIFFUSION_URL
     if not diff_url.endswith('/'):
@@ -215,9 +293,17 @@ def main(
     diff_url = urljoin(diff_url, 'v1/')
     parsed_diff_url = urlparse(diff_url)
 
+    embedding_url = EMBEDDING_URL
+    if not embedding_url.endswith('/'):
+        embedding_url += '/'
+    embedding_url = urljoin(embedding_url, 'v1/')
+    parsed_embedding_url = urlparse(embedding_url)
+
     app = web.Application()
-    app['llm_url'] = parsed_llm_url
+    app['mixtral_url'] = parsed_mixtral_url
+    app['llama_url'] = parsed_llama_url
     app['diff_url'] = parsed_diff_url
+    app['embedding_url'] = parsed_embedding_url
     app.add_routes([web.route('*', '/{tail:.*}', handler)])
 
     web.run_app(app, host='0.0.0.0', port=port)
